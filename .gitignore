@@ -1,0 +1,17 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+backend.hcl
+crash.log
+
+# Build and validation output
+*.tar
+rendered-*.yaml
+.trivycache/
+
+# Editors
+.idea/
+.vscode/

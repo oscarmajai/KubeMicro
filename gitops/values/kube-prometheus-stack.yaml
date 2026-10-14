@@ -1,0 +1,24 @@
+# Pick up every ServiceMonitor/PodMonitor in the cluster, not only the ones this release created.
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    retention: 7d
+    resources:
+      requests: { cpu: 200m, memory: 512Mi }
+
+grafana:
+  admin:
+    existingSecret: grafana-admin   # created by Terraform (random password), never committed
+    userKey: admin-user
+    passwordKey: admin-password
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard      # loads gitops/platform/*-dashboard.yaml
+      searchNamespace: ALL
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests: { cpu: 10m, memory: 64Mi }

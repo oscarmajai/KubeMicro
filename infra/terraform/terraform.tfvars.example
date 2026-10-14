@@ -1,0 +1,7 @@
+region              = "us-east-1"
+admin_cidrs         = ["203.0.113.10/32"] # your public IP: curl -s https://checkip.amazonaws.com
+gitlab_url          = "https://gitlab.com"
+gitlab_project_path = "oscarmajai/kubemicro"
+
+# Cheaper demo setup (~$65/month less) at the cost of single-AZ egress:
+# single_nat_gateway = true

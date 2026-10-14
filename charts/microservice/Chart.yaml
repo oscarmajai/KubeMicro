@@ -1,0 +1,6 @@
+apiVersion: v2
+name: microservice
+description: Generic chart for a KubeMicro HTTP service (HA spread, PDB, HPA, probes, metrics).
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

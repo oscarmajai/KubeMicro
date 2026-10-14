@@ -1,0 +1,145 @@
+# KubeMicro pipeline: validate → build → scan → publish → deploy (GitOps).
+#
+# CI/CD variables (Settings → CI/CD → Variables), values come from `terraform output`:
+#   AWS_REGION          e.g. us-east-1
+#   AWS_ROLE_ARN        ci_role_arn    (assumed with the job's OIDC token, no access keys)
+#   ECR_REGISTRY        ecr_registry   (<account>.dkr.ecr.<region>.amazonaws.com)
+#   GITOPS_PUSH_TOKEN   project access token with write_repository (masked, protected)
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_MESSAGE =~ /\[skip ci\]/
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+stages: [validate, build, scan, publish, deploy]
+
+variables:
+  SERVICES: "catalog orders"
+  DOCKER_IMAGE: docker:29.9.0
+  DOCKER_TLS_CERTDIR: "/certs"
+
+.on_main:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ---------------------------------------------------------------- validate
+go-test:
+  stage: validate
+  image: golang:1.26-alpine
+  script:
+    - cd services
+    - go vet ./...
+    - go test -count=1 ./...
+
+helm-validate:
+  stage: validate
+  image:
+    name: alpine/helm:3.19.0
+    entrypoint: [""]
+  script:
+    - apk add --no-cache curl tar
+    - curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar xz -C /usr/local/bin kubeconform
+    - |
+      for s in $SERVICES; do
+        helm lint --strict charts/microservice -f gitops/values/$s.yaml
+        helm template $s charts/microservice -f gitops/values/$s.yaml --namespace shop > rendered-$s.yaml
+      done
+    - |
+      kubeconform -strict -summary \
+        -schema-location default \
+        -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+        rendered-*.yaml gitops/apps gitops/platform
+
+terraform-validate:
+  stage: validate
+  image:
+    name: hashicorp/terraform:1.13.4
+    entrypoint: [""]
+  script:
+    - cd infra/terraform
+    - terraform fmt -check -recursive
+    - terraform init -backend=false -input=false
+    - terraform validate
+
+# ---------------------------------------------------------------- build
+build:
+  stage: build
+  image: $DOCKER_IMAGE
+  services: ["docker:29.9.0-dind"]
+  needs: [go-test]
+  parallel:
+    matrix:
+      - SERVICE: [catalog, orders]
+  script:
+    - docker build --build-arg SERVICE=$SERVICE -t $SERVICE:$CI_COMMIT_SHORT_SHA services/
+    - docker save -o $SERVICE.tar $SERVICE:$CI_COMMIT_SHORT_SHA
+  artifacts:
+    paths: ["$SERVICE.tar"]
+    expire_in: 1 day
+
+# ---------------------------------------------------------------- scan
+# Blocks the pipeline on any fixable HIGH/CRITICAL CVE in the images or misconfiguration in the
+# IaC and manifests. Accepted risks are listed, with their reason, in .trivyignore.
+trivy:
+  stage: scan
+  image:
+    name: aquasec/trivy:0.67.2
+    entrypoint: [""]
+  needs: [build]
+  variables:
+    TRIVY_CACHE_DIR: .trivycache
+    TRIVY_NO_PROGRESS: "true"
+  cache:
+    key: trivy
+    paths: [.trivycache]
+  script:
+    - for s in $SERVICES; do trivy image --input $s.tar --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1; done
+    - trivy config --severity HIGH,CRITICAL --exit-code 1 --helm-values gitops/values/catalog.yaml .
+
+# ---------------------------------------------------------------- publish
+ecr-push:
+  stage: publish
+  extends: .on_main
+  image: $DOCKER_IMAGE
+  services: ["docker:29.9.0-dind"]
+  needs: [build, trivy]
+  id_tokens:
+    AWS_ID_TOKEN:
+      aud: $CI_SERVER_URL
+  script:
+    - apk add --no-cache aws-cli
+    # The AWS CLI assumes AWS_ROLE_ARN on its own when given a web identity token file.
+    - echo "$AWS_ID_TOKEN" > /tmp/web-identity-token
+    - export AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/web-identity-token AWS_ROLE_SESSION_NAME="gitlab-$CI_PIPELINE_ID"
+    - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+    - |
+      for s in $SERVICES; do
+        docker load -i $s.tar
+        docker tag $s:$CI_COMMIT_SHORT_SHA $ECR_REGISTRY/kubemicro/$s:$CI_COMMIT_SHORT_SHA
+        docker push $ECR_REGISTRY/kubemicro/$s:$CI_COMMIT_SHORT_SHA
+      done
+
+# ---------------------------------------------------------------- deploy
+# GitOps: CI never talks to the cluster. It commits the new image tag and Argo CD syncs it.
+gitops-bump:
+  stage: deploy
+  extends: .on_main
+  image: alpine:3.23.6
+  needs: [ecr-push]
+  resource_group: gitops   # one bump at a time, so pushes never race
+  script:
+    - apk add --no-cache git yq
+    - git fetch origin "$CI_DEFAULT_BRANCH"
+    - git checkout -B "$CI_DEFAULT_BRANCH" "origin/$CI_DEFAULT_BRANCH"
+    - |
+      for s in $SERVICES; do
+        REPO="$ECR_REGISTRY/kubemicro/$s" TAG="$CI_COMMIT_SHORT_SHA" \
+          yq -i '.image.repository = strenv(REPO) | .image.tag = strenv(TAG)' gitops/values/$s.yaml
+      done
+    - git diff --quiet && { echo "Nothing to deploy"; exit 0; }
+    - |
+      git -c user.name="kubemicro-ci" -c user.email="ci@kubemicro.invalid" \
+        commit -am "deploy: $CI_COMMIT_SHORT_SHA [skip ci]"
+    - git push "https://oauth2:${GITOPS_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" "HEAD:$CI_DEFAULT_BRANCH"

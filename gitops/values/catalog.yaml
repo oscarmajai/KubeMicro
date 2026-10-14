@@ -1,0 +1,5 @@
+# Deployed by Argo CD (gitops/apps/catalog.yaml). CI rewrites image.repository and image.tag on every
+# merge to main; 123456789012 is a placeholder account until the first pipeline run.
+image:
+  repository: 123456789012.dkr.ecr.us-east-1.amazonaws.com/kubemicro/catalog
+  tag: bootstrap

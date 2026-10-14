@@ -1,0 +1,36 @@
+# Defaults shared by every service; each service overrides what it needs in gitops/values/<service>.yaml.
+
+image:
+  repository: ""        # e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/kubemicro/catalog
+  tag: ""               # bumped by CI to the commit SHA; never "latest"
+  pullPolicy: IfNotPresent
+
+replicaCount: 3         # ignored when autoscaling.enabled (HPA owns the count)
+
+containerPort: 8080
+env: {}
+
+resources:
+  requests: { cpu: 50m, memory: 32Mi }
+  limits: { memory: 64Mi }   # no CPU limit on purpose: avoids CFS throttling, requests drive scheduling
+
+autoscaling:
+  enabled: true
+  minReplicas: 3        # one per AZ
+  maxReplicas: 9
+  targetCPUUtilizationPercentage: 70
+
+pdb:
+  maxUnavailable: 1     # node drains and upgrades take pods down one at a time
+
+# Spread replicas across AZs first, then nodes, so losing a zone or a node keeps the service up.
+topologySpread:
+  enabled: true
+
+serviceMonitor:
+  enabled: true         # scraped by kube-prometheus-stack
+  interval: 30s
+
+# Seconds the pod keeps serving after removal from endpoints, so in-flight requests finish.
+preStopSleepSeconds: 5
+terminationGracePeriodSeconds: 30
